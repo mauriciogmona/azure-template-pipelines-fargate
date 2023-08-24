@@ -1,0 +1,174 @@
+parameters:
+  - name: vmImage
+    type: string
+    default: "ubuntu-latest"
+  - name: SkipFailed
+    type: boolean
+    default: false
+  - name: awsRegion
+    default: us-east-1
+  - name: tag
+    default: latest
+  - name: nodejsVersion
+    default: 16.x
+  - name: fargateClusterTarget
+    default: cluster-ms-dev
+  - name: tagName
+    type: string
+    default: $(Build.BuildNumber)-$(Build.SourceBranchName) 
+  - name: stage
+    type: string
+    default: dev
+
+jobs:
+  - job: "Set_value"
+    displayName: "Set variables and values" 
+    variables:
+      - name: valueGroupName
+        value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
+      - name: AWS_REGION
+        value: ${{ parameters.awsRegion }}
+      - name: TAG
+        value: ${{ parameters.tag }}
+    pool:
+      vmImage: ${{ parameters.vmImage }} 
+    steps:
+      - checkout: self     
+      - script: |
+          echo $BUILD_REQUESTEDFOREMAIL
+          echo $BUILD_REQUESTEDFOR
+          echo 'repository name: '$(Build.Repository.Name)
+          echo 'group variables: '${{variables['valueGroupName']}}
+          echo 'cluster name   : '${{parameters.fargateClusterTarget}}
+          echo 'tag name       : '$(Build.BuildNumber)-$(Build.SourceBranchName) 
+        displayName: "Ver para validar cluster y grupo de variables"   
+  - job: "Add_tags"
+    dependsOn: Set_value
+    displayName: "Make tag" 
+    variables:
+      - name: valueGroupName
+        value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
+      - group: ${{ variables.valueGroupName }}
+      - name: AWS_REGION
+        value: ${{ parameters.awsRegion }}
+      - name: TAG
+        value: ${{ parameters.tag }}
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    continueOnError: ${{ parameters.SkipFailed }}
+    steps:
+      - checkout: self
+        persistCredentials: true
+      - task: PowerShell@2
+        displayName: set variable buildTimeStamp
+        inputs:
+          targetType: 'inline'
+          script: |
+            $date=$(Get-Date -Format yyyy-MM-dd_HH.mm.ss);
+            Write-Host "##vso[task.setvariable variable=BUILD_DATE]$date"
+      - script: |
+          git config --global user.email $BUILD_REQUESTEDFOREMAIL
+          git config --global user.name "$BUILD_REQUESTEDFOR"
+          git tag -a ${{ parameters.tagName }} -m 'Deployment: $(BUILD_DATE), Brach: $(Build.SourceBranchName)'
+          git push https://$(System.AccessToken)@dev.azure.com/ORGANIZACION/PROYECTO/_git/$(Build.Repository.Name)  ${{ parameters.tagName }} 
+        workingDirectory: $(Build.SourcesDirectory)  
+        displayName: "Add tag"
+  - job: "Build"
+    dependsOn: Add_tags
+    variables:
+      - name: valueGroupName
+        value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
+      - group: ${{ variables.valueGroupName }}
+      - name: AWS_REGION
+        value: ${{ parameters.awsRegion }}
+      - name: TAG
+        value: ${{ parameters.tag }}
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    continueOnError: ${{ parameters.SkipFailed }}
+    steps:
+      - checkout: self
+      - task: replacetokens@5
+        inputs:
+          rootDirectory: '$(System.DefaultWorkingDirectory)'
+          targetFiles: '**/.env'
+          encoding: 'auto'
+          tokenPattern: 'default'
+          writeBOM: true
+          actionOnMissing: 'warn'
+          keepToken: false
+          actionOnNoFiles: 'continue'
+          enableTransforms: false
+          enableRecursion: false
+          useLegacyPattern: false
+          enableTelemetry: true
+        displayName: "Remplazo de variables"
+      - task: NodeTool@0
+        inputs:
+          versionSpec: ${{ parameters.nodejsVersion }}
+        displayName: "Install Node.js"
+      - script: npm install
+        displayName: "Install npm dependencies"
+      - task: Docker@2
+        displayName: Build an image
+        inputs:
+          command: build
+          dockerfile: "$(Build.SourcesDirectory)/Dockerfile"
+          buildContext: "$(Build.SourcesDirectory)"
+          repository: $(APP_NAME)
+          tags: |
+            $(TAG)
+            latest
+      - task: AWSShellScript@1
+        inputs:
+          awsCredentials: 'aws-ecr'
+          regionName: "$(AWS_REGION)"
+          scriptType: "inline"
+          inlineScript: |
+            aws ecr describe-repositories --repository-names $(APP_NAME) || aws ecr create-repository --repository-name $(APP_NAME)
+        displayName: "Make or update repo ecr $(APP_NAME)"      
+      - task: ECRPushImage@1
+        displayName: Push image to ECR $(TAG) 
+        inputs:
+          awsCredentials: 'aws-ecr'
+          regionName: "$(AWS_REGION)"
+          imageSource: "imagename"
+          sourceImageName: "$(APP_NAME)"
+          sourceImageTag: $(TAG)
+          repositoryName: "$(APP_NAME)"
+          pushTag: $(TAG)
+      - task: ECRPushImage@1
+        displayName: Push image to ECR latest
+        inputs:
+          awsCredentials: 'aws-ecr'
+          regionName: "$(AWS_REGION)"
+          imageSource: "imagename"
+          sourceImageName: "$(APP_NAME)"
+          sourceImageTag: latest
+          repositoryName: "$(APP_NAME)"
+          pushTag: latest  
+  - job: "Deploy"
+    variables:
+      - name: valueGroupName
+        value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
+      - group: ${{ variables.valueGroupName }}
+      - name: AWS_REGION
+        value: ${{ parameters.awsRegion }}
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    dependsOn: Build
+    continueOnError: ${{ parameters.SkipFailed }}
+    steps:
+      - checkout: self
+      - task: AWSShellScript@1
+        inputs:
+          awsCredentials: 'aws-ecr'
+          regionName: "$(AWS_REGION)"
+          scriptType: "inline"
+          inlineScript: |
+            echo aws ecs update-service --cluster ${{parameters.fargateClusterTarget}} --service $(APP_NAME) --force-new-deployment
+            aws ecs update-service --cluster ${{parameters.fargateClusterTarget}} --service $(APP_NAME) --force-new-deployment
+        displayName: "Deploy service"
+  
+      
+     
