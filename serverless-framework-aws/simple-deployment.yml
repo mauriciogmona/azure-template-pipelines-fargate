@@ -86,6 +86,8 @@ jobs:
         inputs:
           versionSpec: ${{ parameters.nodejsVersion }}
         displayName: "Install Node.js"
+      - script: npm install -g serverless
+        displayName: "Install serverless"  
       - script: npm install -no-cache
         displayName: "Install npm dependencies"
  
