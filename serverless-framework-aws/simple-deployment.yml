@@ -10,7 +10,7 @@ parameters:
   - name: nodejsVersion
     default: 18.x
   - name: buscketName
-    default: sls-deployment-bucket
+    default: sls-default-deployment-bucket
   - name: tagName
     type: string
     default: $(Build.BuildNumber)-$(Build.SourceBranchName) 
@@ -19,36 +19,15 @@ parameters:
     default: dev
 
 jobs:
-  - job: "Set_value"
-    displayName: "Set variables and values" 
-    variables:
-      - name: valueGroupName
-        value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
-      - name: AWS_REGION
-        value: ${{ parameters.awsRegion }}
-    pool:
-      vmImage: ${{ parameters.vmImage }} 
-    steps:
-      - checkout: self     
-      - script: |
-          echo $BUILD_REQUESTEDFOREMAIL
-          echo $BUILD_REQUESTEDFOR
-          echo 'repository name: '$(Build.Repository.Name)
-          echo 'group variables: '${{variables['valueGroupName']}}
-          echo 'bucket name    : '${{parameters.buscketName}}-${{parameters.stage}}
-          echo 'tag name       : '$(Build.BuildNumber)-$(Build.SourceBranchName) 
-        displayName: "Ver para validar cluster y grupo de variables"   
   - job: "Build"
-    dependsOn: Set_value
     variables:
       - name: valueGroupName
         value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
+      - name: currentDate
+        value: $[ format('{0:yyyy}.{0:MM}.{0:dd}', pipeline.startTime) ]  
       - group: ${{ variables.valueGroupName }}
-      - name: AWS_REGION
-        value: ${{ parameters.awsRegion }}
-      - name: TAG
-        value: ${{ parameters.tag }}
     pool:
+      name: linux-agent 
       vmImage: ${{ parameters.vmImage }}
     continueOnError: ${{ parameters.SkipFailed }}
     steps:
@@ -72,15 +51,15 @@ jobs:
         displayName: set variable buildTimeStamp
         inputs:
           targetType: 'inline'
+          pwsh: true
           script: |
-            $date=$(Get-Date -Format yyyy-MM-dd_HH.mm.ss);
-            Write-Host "##vso[task.setvariable variable=BUILD_DATE]$date"
+            Write-Host "##vso[task.setvariable variable=BUILD_DATE]$(date +%Y-%m-%d_%H.%M.%S)"
+            echo $BUILD_DATE
       - script: |
           git config --global user.email $BUILD_REQUESTEDFOREMAIL
           git config --global user.name "$BUILD_REQUESTEDFOR"
           git tag -a ${{ parameters.tagName }} -m 'Deployment: $(BUILD_DATE), Brach: $(Build.SourceBranchName)'
-          git push https://$(System.AccessToken)@dev.azure.com/ORGANIZACION/PROYECTO/_git/$(Build.Repository.Name)  ${{ parameters.tagName }} 
-        workingDirectory: $(Build.SourcesDirectory)  
+          git push https://$(System.AccessToken)@dev.azure.com/{organization}/{project}/_git/$(Build.Repository.Name)  ${{ parameters.tagName }} 
         displayName: "Add tag"  
       - task: NodeTool@0
         inputs:
@@ -88,17 +67,15 @@ jobs:
         displayName: "Install Node.js"
       - script: npm install -g serverless
         displayName: "Install serverless"  
-      - script: npm install -no-cache
+      - script: npm install
         displayName: "Install npm dependencies"
- 
   - job: "Deploy"
     variables:
       - name: valueGroupName
         value: ${{variables['Build.Repository.Name']}}-${{parameters.stage}}
       - group: ${{ variables.valueGroupName }}
-      - name: AWS_REGION
-        value: ${{ parameters.awsRegion }}
     pool:
+      name: linux-agent
       vmImage: ${{ parameters.vmImage }}
     dependsOn: Build
     continueOnError: ${{ parameters.SkipFailed }}
@@ -106,8 +83,8 @@ jobs:
       - checkout: self
       - task: AWSShellScript@1
         inputs:
-          awsCredentials: 'aws-serveless'-${{parameters.stage}}
-          regionName: "$(AWS_REGION)"
+          awsCredentials: aws_service_${{parameters.stage}}
+          regionName: ${{parameters.awsRegion}}
           scriptType: "inline"
           inlineScript: |
             serverless deploy --region ${{ parameters.awsRegion }} --stage ${{parameters.stage}}
